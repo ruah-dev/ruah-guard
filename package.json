@@ -1,11 +1,11 @@
 {
 	"name": "@ruah-dev/guard",
 	"version": "0.1.0",
-	"description": "Policy engine for agent safety — permissions, secrets scan, approvals, audit",
+	"description": "Policy engine for agent safety \u2014 permissions, secrets scan, approvals, audit",
 	"type": "module",
 	"ruah": {
 		"namespace": "guard",
-		"description": "Policy engine for agent safety — permissions, secrets scan, approvals, audit"
+		"description": "Policy engine for agent safety \u2014 permissions, secrets scan, approvals, audit"
 	},
 	"bin": {
 		"ruah-guard": "./bin/ruah-guard.js"
@@ -69,7 +69,7 @@
 		"node": ">=18.0.0"
 	},
 	"dependencies": {
-		"@ruah-dev/cli": "^1.2.0"
+		"@ruah-dev/cli": "github:ruah-dev/ruah-cli#v1.2.2"
 	},
 	"peerDependencies": {
 		"@ruah-dev/schema": "^0.1.0"
