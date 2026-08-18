@@ -1,4 +1,0 @@
-{"ts":"2026-08-18T12:52:25.871Z","actor":"petre","action":"check.command","decision":"deny","details":{"command":"rm -rf /","rule":"deny-rm-root"}}
-{"ts":"2026-08-18T12:53:14.298Z","actor":"petre","action":"hook","decision":"deny","details":{"tool":"Bash","rule":"deny-rm-root","matched":"rm -rf /"}}
-{"ts":"2026-08-18T12:53:14.360Z","actor":"petre","action":"hook","decision":"allow","details":{"tool":"Bash","rule":null,"matched":"ls"}}
-{"ts":"2026-08-18T12:53:14.421Z","actor":"petre","action":"check.command","decision":"deny","details":{"command":"bash -c \"rm -rf ~\"","rule":"deny-rm-root"}}
