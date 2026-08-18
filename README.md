@@ -8,9 +8,10 @@ Ships as a library, a CLI, and a drop-in Claude Code / generic hook.
 ## 30-second quickstart
 
 ```bash
-npx @ruah-dev/guard init
-npx @ruah-dev/guard check --cmd 'rm -rf /' --json
-echo '{"tool":"Bash","command":"rm -rf /"}' | npx @ruah-dev/guard hook --stdin
+npm i -g @ruah-dev/guard   # also installs `ruah`
+ruah guard init
+ruah guard check --cmd 'rm -rf /' --json
+echo '{"tool":"Bash","command":"rm -rf /"}' | ruah guard hook --stdin
 ```
 
 Requires Node.js >= 18. **Zero runtime dependencies.** Peer: `@ruah-dev/schema`.

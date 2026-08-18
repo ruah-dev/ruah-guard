@@ -21,10 +21,12 @@
 	"files": [
 		"dist/",
 		"bin/",
+		"scripts/",
 		"LICENSE",
 		"README.md"
 	],
 	"scripts": {
+		"postinstall": "node ./scripts/ensure-ruah.mjs",
 		"build": "tsc && chmod +x dist/cli.js",
 		"dev": "tsc --watch",
 		"typecheck": "tsc --noEmit",
@@ -66,7 +68,9 @@
 	"engines": {
 		"node": ">=18.0.0"
 	},
-	"dependencies": {},
+	"dependencies": {
+		"@ruah-dev/cli": "^1.2.0"
+	},
 	"peerDependencies": {
 		"@ruah-dev/schema": "^0.1.0"
 	},
