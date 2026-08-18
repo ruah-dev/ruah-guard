@@ -1,0 +1,83 @@
+{
+	"name": "@ruah-dev/guard",
+	"version": "0.1.0",
+	"description": "Policy engine for agent safety — permissions, secrets scan, approvals, audit",
+	"type": "module",
+	"ruah": {
+		"namespace": "guard",
+		"description": "Policy engine for agent safety — permissions, secrets scan, approvals, audit"
+	},
+	"bin": {
+		"ruah-guard": "./bin/ruah-guard.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist/",
+		"bin/",
+		"LICENSE",
+		"README.md"
+	],
+	"scripts": {
+		"build": "tsc && chmod +x dist/cli.js",
+		"dev": "tsc --watch",
+		"typecheck": "tsc --noEmit",
+		"lint": "biome check . --config-path ./biome.json",
+		"format": "biome check --write . --config-path ./biome.json",
+		"pretest": "tsc -p tsconfig.test.json",
+		"test": "node --test dist-test/test/*.test.js",
+		"clean": "rm -rf dist dist-test",
+		"prepublishOnly": "npm run clean && npm run build && npm test"
+	},
+	"keywords": [
+		"ai",
+		"agents",
+		"ruah",
+		"security",
+		"policy",
+		"guardrails",
+		"secrets",
+		"secret-scanning",
+		"approvals",
+		"human-in-the-loop",
+		"audit",
+		"multi-agent"
+	],
+	"author": "ruah-dev",
+	"license": "MIT",
+	"publishConfig": {
+		"access": "public"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ruah-dev/ruah-guard.git"
+	},
+	"bugs": {
+		"url": "https://github.com/ruah-dev/ruah-guard/issues"
+	},
+	"homepage": "https://ruah.sh",
+	"engines": {
+		"node": ">=18.0.0"
+	},
+	"dependencies": {},
+	"peerDependencies": {
+		"@ruah-dev/schema": "^0.1.0"
+	},
+	"peerDependenciesMeta": {
+		"@ruah-dev/schema": {
+			"optional": false
+		}
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.10",
+		"@ruah-dev/schema": "file:../ruah-schema",
+		"@types/node": "^25.5.2",
+		"typescript": "^6.0.2"
+	}
+}
