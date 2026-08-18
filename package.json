@@ -1,6 +1,6 @@
 {
 	"name": "@ruah-dev/guard",
-	"version": "0.1.0",
+	"version": "0.1.1",
 	"description": "Policy engine for agent safety \u2014 permissions, secrets scan, approvals, audit",
 	"type": "module",
 	"ruah": {

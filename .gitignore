@@ -3,4 +3,5 @@ dist/
 dist-test/
 *.tgz
 .DS_Store
-.ruah/
+.ruah/*
+!.ruah/verify.json

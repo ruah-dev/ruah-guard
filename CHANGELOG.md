@@ -4,6 +4,8 @@ All notable changes to `@ruah-dev/guard` are documented here.
 
 ## Unreleased
 
+## 0.1.1 — 2026-08-19
+
 ### Changed
 
 - README now leads with the §0.7 question (portable + testable policy across
