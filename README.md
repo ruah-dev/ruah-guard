@@ -1,31 +1,41 @@
 # @ruah-dev/guard
 
-A policy engine that sits between an agent and the world: block destructive
-commands, catch secrets before they land in git, bound the blast radius.
+> **Can I trust the agent not to do damage — in *any* harness, with proof?**
 
-Ships as a library, a CLI, and a drop-in Claude Code / generic hook.
+One deterministic policy file. The same verdict in Claude Code, Codex, Cursor,
+CI, and a local `check`. Backed by a bypass-attempt suite (quoting, `bash -c`,
+`$HOME`, `;` / `&&` chains, `base64 | sh`) that a hand-rolled hook never has.
 
-## 30-second quickstart
+That is the edge over built-in permission modes: **portable and testable**, not
+"it blocks `rm -rf`".
 
 ```bash
-npm i -g @ruah-dev/guard   # also installs `ruah`
-ruah guard init
-ruah guard check --cmd 'rm -rf /' --json
-echo '{"tool":"Bash","command":"rm -rf /"}' | ruah guard hook --stdin
+npm i -g @ruah-dev/guard          # also installs `ruah`
+ruah guard hook claude-code       # paste into ~/.claude/settings.json
+echo '{"tool":"Bash","command":"bash -c \"rm -rf ~\""}' \
+  | ruah guard hook --stdin --json
 ```
 
-Requires Node.js >= 18. **Zero runtime dependencies.** Peer: `@ruah-dev/schema`.
+Same policy, no harness:
+
+```bash
+ruah guard check --cmd 'bash -c "rm -rf ~"' --json
+```
+
+Requires Node.js >= 18. **Zero runtime dependencies** for the engine. Peer:
+`@ruah-dev/schema`. `@ruah-dev/cli` is a *front-door* install dep so `ruah guard`
+exists after `npm i -g @ruah-dev/guard`; the library does not import it.
 
 ## JSON output
 
 ```bash
-$ ruah-guard check --cmd 'rm -rf /' --json
+$ ruah guard check --cmd 'bash -c "rm -rf ~"' --json
 {
   "schemaVersion": "1",
   "decision": "deny",
   "ruleId": "deny-rm-root",
   "reason": "Recursive delete targeting filesystem root or home",
-  "matched": "rm -rf /",
+  "matched": "rm -rf ~",
   "severity": "critical"
 }
 ```
@@ -34,46 +44,42 @@ Exit codes: `0` allow / clean scan, `1` deny / pending approval / findings /
 user error, `2` internal error. `--json` keeps machines on stdout and humans
 on stderr.
 
-## Composition
+## Same file, every harness
+
+`.ruah/guard.json` is a `Policy` from `@ruah-dev/schema`. `ruah guard init`
+writes a starter. No file → built-in defaults.
+
+| Harness | How |
+|---------|-----|
+| Claude Code | `ruah guard hook claude-code` → PreToolUse command |
+| Codex / Cursor / anything | `ruah guard hook --stdin` (generic `{tool,command}` or PreToolUse JSON) |
+| CI / scripts | `ruah guard check --cmd "$CMD" --json` |
+| Pre-commit secrets | `ruah guard check --file staged.diff --json` |
 
 ```bash
-ruah-guard check --cmd "$CMD" --json | jq -e '.decision == "allow"'
-ruah-guard scan --json | jq '.findings[] | {file, detector, excerpt}'
+ruah guard check --cmd "$CMD" --json | jq -e '.decision == "allow"'
+ruah guard scan --json | jq '.findings[] | {file, detector, excerpt}'
 ```
 
-Install the Claude Code hook:
+## What the suite actually covers
 
-```bash
-ruah-guard hook claude-code
-# paste the printed block into ~/.claude/settings.json
-```
-
-## What it does
-
-- **Commands** — ordered `Policy` rules from `@ruah-dev/schema`. First match
-  wins. Built-in defaults deny `rm -rf /` `~` `.`, `dd`, `mkfs`, DROP/TRUNCATE,
-  force-push to main, `curl|bash`, `chmod 777`, `> /dev/sd*`, `git reset --hard`
-  + `clean -fd`, `base64 -d | sh`. Wrappers (`sudo`, `command`, `bash -c`,
-  `$HOME`, `;` / `&&` chains) are expanded before matching.
+- **Commands** — first matching `Policy` rule wins. Defaults deny recursive
+  delete of `/` `~` `.`, `dd`, `mkfs`, DROP/TRUNCATE, force-push to main,
+  `curl|bash`, `chmod 777`, `> /dev/sd*`, `git reset --hard` + `clean -fd`,
+  `base64 -d | sh`. Wrappers are expanded before matching.
 - **Secrets** — Stripe / Anthropic / AWS / GitHub / PEM / JWT / high-entropy.
-  Excerpts are `sk_live_••••`, never the value. Allowlist:
-  `{ "secrets": { "allow": ["EXAMPLE_KEY"] } }` in `.ruah/guard.json`.
+  Excerpts are `sk_live_••••`. Allowlist: `{ "secrets": { "allow": ["EXAMPLE_KEY"] } }`.
 - **Paths** — glob rules; `.git/**` writes and `*.pem` / `id_rsa*` denied.
-- **Approvals** — `ask` / `approve` queues at `.ruah/approvals.json`.
-- **Audit** — append-only `.ruah/guard-audit.jsonl`. `ruah-guard audit --last 50 --json`
-  and `--stats`. Torn last lines are skipped.
+- **Approvals** — `ask` / `approve` queue at `.ruah/approvals.json`.
+- **Audit** — `.ruah/guard-audit.jsonl`. `ruah guard audit --last 50 --json`.
 
-Policy file: `.ruah/guard.json` (legacy `.ruah/policy.json` still loads).
-`ruah-guard init` writes a starter copy of the default policy.
-
-## Honest limits (not yet / not ever)
+## Honest limits
 
 - **Not a shell interpreter.** `x=$(printf rm); $x -rf /` and
-  `python -c 'os.system("rm -rf /")'` are documented-as-uncatchable. Guard is
-  best-effort pattern defense and says so.
+  `python -c 'os.system("rm -rf /")'` are documented-as-uncatchable.
 - No network sandbox, no containers, no LLM "intent detection".
-- `ruah guard …` via the top-level CLI needs the ruah-cli router (W2). The
-  standalone `ruah-guard` binary works today.
+- Full list of caught vs documented-uncatchable bypasses is the test suite
+  (`test/normalize.test.ts`, `test/policy.test.ts`).
 
 ## License
 

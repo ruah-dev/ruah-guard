@@ -154,7 +154,7 @@ export function failOpenVerdict(reason: string): HookResult {
 
 /** Ready-to-paste Claude Code settings.json hook block. */
 export function claudeCodeHookConfig(
-	command = "ruah-guard hook --stdin",
+	command = "ruah guard hook --stdin",
 ): string {
 	return `${JSON.stringify(
 		{

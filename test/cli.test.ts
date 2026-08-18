@@ -361,7 +361,7 @@ describe("ruah-guard CLI", () => {
 		const result = run(["hook", "claude-code"], cwd);
 		assert.equal(result.status, 0);
 		assert.match(result.stdout, /PreToolUse/);
-		assert.match(result.stdout, /ruah-guard hook --stdin/);
+		assert.match(result.stdout, /ruah guard hook --stdin/);
 	});
 
 	it("hook --stdin denies rm -rf and always exits 0", () => {

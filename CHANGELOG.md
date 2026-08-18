@@ -4,6 +4,14 @@ All notable changes to `@ruah-dev/guard` are documented here.
 
 ## Unreleased
 
+### Changed
+
+- README now leads with the §0.7 question (portable + testable policy across
+  harnesses). Leading with "blocks rm -rf" was a positioning failure — the
+  built-in permission modes already do that in one harness.
+- `hook claude-code` default command is `ruah guard hook --stdin` (front door),
+  not the standalone `ruah-guard` binary.
+
 ### Added
 
 - Command expansion: `sudo`, `command`, `bash -c` / `sh -c`, `$HOME` / `${HOME}`,

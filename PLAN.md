@@ -1,7 +1,10 @@
 # ruah-guard — Deep Build Plan
 
-> Read first: `../GROK_BUILD_PLAN.md` §T1, `../ENGINEERING_STANDARDS.md`.
-> Package: `@ruah-dev/guard` · CLI: `ruah guard …` / `ruah-guard` · Build slot: **T1 (first)**
+> **Question it answers.** Can I trust the agent not to do damage — in *any*
+> harness, with proof?
+>
+> Read first: `../GROK_BUILD_PLAN.md` §T1 + §0.7, `../ENGINEERING_STANDARDS.md`.
+> Package: `@ruah-dev/guard` · CLI: `ruah guard …` · Build slot: **T1 (first)**
 
 ## 1. Where the code is today (verified 2026-08-18)
 
@@ -101,6 +104,19 @@ applies with zero config; user policy extends/overrides it by rule id.
 Terminal GIF, ≤ 30s: agent session where `rm -rf` gets denied with rule id, then a
 commit with an API key gets blocked with the redacted preview. Closing frame:
 `npx @ruah-dev/guard init`.
+
+## 6.5 Language note — hook latency trigger
+
+The whole ecosystem is TypeScript/Node by decision (distribution via npx, zero-dep
+stdlib, audience) — do not revisit per package. The ONE sanctioned exception path:
+the guard **hook binary** is spawned per agent tool call, so cold start is product
+surface. Budget: < 50ms per decision (M2 latency test). If dogfooding (big plan
+§2.6) shows the Node hook measurably slowing sessions — measure with ruah-opt,
+don't guess — the approved remedy is porting ONLY the hook binary to Rust (small
+static binary, same stdin/stdout JSON contract, policy file parsed identically,
+verified by running the existing hook e2e suite against both implementations).
+The library, CLI, scanner, and audit stay TypeScript. Do not start this port
+speculatively; it requires a recorded measurement first.
 
 ## 7. Don'ts
 
