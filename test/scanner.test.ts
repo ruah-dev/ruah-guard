@@ -48,7 +48,8 @@ describe("scanText — secret classes", () => {
 		assert.equal(findings.length, 1);
 		assert.equal(findings[0].detector, "stripe-live-key");
 		assert.equal(findings[0].severity, "critical");
-		assert.ok(findings[0].excerpt.includes("****"));
+		assert.ok(findings[0].excerpt.startsWith("sk_live_"));
+		assert.ok(findings[0].excerpt.includes("••••"));
 		assert.ok(!findings[0].excerpt.includes("FAKE1234567890abcdef"));
 	});
 
@@ -103,6 +104,13 @@ describe("scanText — secret classes", () => {
 		assert.equal(findings[0].line, 3);
 	});
 
+	it("allowlist drops matching findings (false-positive hatch)", () => {
+		const findings = scanText(`const k = "${SK_LIVE}";`, {
+			allow: ["sk_live_FAKE"],
+		});
+		assert.equal(findings.length, 0);
+	});
+
 	it("supports custom secret rules from a policy", () => {
 		const findings = scanText("token INTERNAL_TOKEN_123456", {
 			customRules: [
@@ -129,15 +137,24 @@ describe("scanText — entropy detector", () => {
 	});
 
 	it("ignores ordinary long identifiers", () => {
-		assert.equal(scanText("export const LONG_CONSTANT_NAME_FOR_THINGS = 1").length, 0);
+		assert.equal(
+			scanText("export const LONG_CONSTANT_NAME_FOR_THINGS = 1").length,
+			0,
+		);
 	});
 
 	it("ignores hex digests like git SHAs", () => {
-		assert.equal(scanText('sha = "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"').length, 0);
+		assert.equal(
+			scanText('sha = "3b18e512dba79e4c8300dd08aeb37f8e728b8dad"').length,
+			0,
+		);
 	});
 
 	it("honors a custom entropy threshold", () => {
-		assert.equal(scanText(`secret = "${HIGH_ENTROPY}"`, { entropyThreshold: 99 }).length, 0);
+		assert.equal(
+			scanText(`secret = "${HIGH_ENTROPY}"`, { entropyThreshold: 99 }).length,
+			0,
+		);
 	});
 });
 
@@ -148,10 +165,9 @@ describe("entropy / masking / severity helpers", () => {
 	});
 
 	it("maskSecret hides the middle", () => {
-		assert.equal(maskSecret("short"), "*****");
+		assert.equal(maskSecret("short"), "•••••");
 		const masked = maskSecret(SK_LIVE);
-		assert.ok(masked.startsWith("sk_l"));
-		assert.ok(masked.includes("****"));
+		assert.equal(masked, "sk_live_••••");
 		assert.ok(!masked.includes("FAKE1234567890"));
 	});
 
@@ -209,14 +225,19 @@ describe("scanDir", () => {
 		write(".env", "API_KEY=realvalue123\n# comment\nEMPTY=\n");
 		write(".env.example", "API_KEY=somevalue123\n");
 		const result = scanDir(root);
-		const envFindings = result.findings.filter((f) => f.detector === "env-file-value");
+		const envFindings = result.findings.filter(
+			(f) => f.detector === "env-file-value",
+		);
 		assert.equal(envFindings.length, 1);
 		assert.equal(envFindings[0].file, ".env");
 		assert.ok(!envFindings[0].excerpt.includes("realvalue123"));
 	});
 
 	it("skips binary files", () => {
-		const binary = Buffer.concat([Buffer.from([0, 1, 2, 0]), Buffer.from(SK_LIVE)]);
+		const binary = Buffer.concat([
+			Buffer.from([0, 1, 2, 0]),
+			Buffer.from(SK_LIVE),
+		]);
 		writeFileSync(join(root, "blob.bin"), binary);
 		const result = scanDir(root);
 		assert.equal(result.findings.length, 0);

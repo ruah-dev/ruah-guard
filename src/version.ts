@@ -27,7 +27,9 @@ function findPackageVersion(): string {
 		current = parent;
 	}
 
-	throw new Error("Unable to locate package.json for ruah-guard version lookup");
+	throw new Error(
+		"Unable to locate package.json for ruah-guard version lookup",
+	);
 }
 
 export const VERSION = findPackageVersion();

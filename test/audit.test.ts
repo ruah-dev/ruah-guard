@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -16,7 +22,7 @@ describe("audit log", () => {
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("appendAudit creates .ruah/audit.jsonl and returns the full entry", () => {
+	it("appendAudit creates .ruah/guard-audit.jsonl and returns the full entry", () => {
 		const entry = appendAudit(root, {
 			action: "check.command",
 			decision: "deny",
@@ -25,7 +31,7 @@ describe("audit log", () => {
 		});
 		assert.equal(entry.actor, "test-actor");
 		assert.match(entry.ts, /^\d{4}-\d{2}-\d{2}T/);
-		const file = join(root, ".ruah", "audit.jsonl");
+		const file = join(root, ".ruah", "guard-audit.jsonl");
 		assert.ok(existsSync(file));
 		const lines = readFileSync(file, "utf8").trim().split("\n");
 		assert.equal(lines.length, 1);
@@ -58,7 +64,10 @@ describe("audit log", () => {
 
 	it("readAudit skips malformed lines instead of throwing", () => {
 		appendAudit(root, { action: "good", actor: "t" });
-		appendFileSync(join(root, ".ruah", "audit.jsonl"), "this is not json\n");
+		appendFileSync(
+			join(root, ".ruah", "guard-audit.jsonl"),
+			"this is not json\n",
+		);
 		appendAudit(root, { action: "also-good", actor: "t" });
 		const entries = readAudit(root);
 		assert.deepEqual(

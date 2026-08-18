@@ -57,7 +57,9 @@ export function loadApprovals(root: string): ApprovalRequest[] {
 		parsed === null ||
 		!Array.isArray((parsed as { requests?: unknown }).requests)
 	) {
-		throw new UserError(`Malformed approvals file ${file} — expected { "requests": [...] }`);
+		throw new UserError(
+			`Malformed approvals file ${file} — expected { "requests": [...] }`,
+		);
 	}
 	return (parsed as { requests: ApprovalRequest[] }).requests;
 }
@@ -65,7 +67,11 @@ export function loadApprovals(root: string): ApprovalRequest[] {
 function saveApprovals(root: string, requests: ApprovalRequest[]): void {
 	const dir = join(root, RUAH_DIR);
 	mkdirSync(dir, { recursive: true });
-	writeFileSync(approvalsPath(root), `${JSON.stringify({ requests }, null, "\t")}\n`, "utf8");
+	writeFileSync(
+		approvalsPath(root),
+		`${JSON.stringify({ requests }, null, "\t")}\n`,
+		"utf8",
+	);
 }
 
 /** Queue a new pending approval request and persist it. */
@@ -93,7 +99,10 @@ export function requestApproval(
 }
 
 /** List approval requests, optionally filtered by status. */
-export function listApprovals(root: string, status?: ApprovalStatus): ApprovalRequest[] {
+export function listApprovals(
+	root: string,
+	status?: ApprovalStatus,
+): ApprovalRequest[] {
 	const all = loadApprovals(root);
 	return status === undefined ? all : all.filter((r) => r.status === status);
 }
@@ -107,7 +116,9 @@ function decide(
 	const requests = loadApprovals(root);
 	const request = requests.find((r) => r.id === id);
 	if (!request) {
-		throw new UserError(`No approval request with id "${id}" — see: ruah-guard approve list`);
+		throw new UserError(
+			`No approval request with id "${id}" — see: ruah-guard approve list`,
+		);
 	}
 	if (request.status !== "pending") {
 		throw new UserError(`Approval ${id} was already ${request.status}`);
@@ -120,12 +131,20 @@ function decide(
 }
 
 /** Grant a pending approval request. */
-export function grantApproval(root: string, id: string, actor?: string): ApprovalRequest {
+export function grantApproval(
+	root: string,
+	id: string,
+	actor?: string,
+): ApprovalRequest {
 	return decide(root, id, "granted", actor);
 }
 
 /** Deny a pending approval request. */
-export function denyApproval(root: string, id: string, actor?: string): ApprovalRequest {
+export function denyApproval(
+	root: string,
+	id: string,
+	actor?: string,
+): ApprovalRequest {
 	return decide(root, id, "denied", actor);
 }
 

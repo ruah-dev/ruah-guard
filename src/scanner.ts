@@ -9,7 +9,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 import type { PolicyRule, RiskLevel } from "@ruah-dev/schema";
 import { UserError } from "./errors.js";
@@ -41,6 +41,11 @@ export interface ScanTextOptions {
 	entropyThreshold?: number;
 	/** Extra `secret` rules from a policy — each pattern becomes a detector. */
 	customRules?: PolicyRule[];
+	/**
+	 * Allowlist of regex sources (or literal substrings). A finding whose
+	 * raw match or excerpt matches any entry is dropped. False-positive hatch.
+	 */
+	allow?: string[];
 }
 
 /** Options for {@link scanDir} / {@link scanFiles}. */
@@ -86,10 +91,38 @@ export function shannonEntropy(value: string): number {
 	return entropy;
 }
 
-/** Mask a secret for safe display: first 4 chars + "****" + last 2. */
+const KNOWN_PREFIXES = [
+	"sk_live_",
+	"sk_test_",
+	"sk-ant-",
+	"ghp_",
+	"gho_",
+	"ghu_",
+	"ghs_",
+	"ghr_",
+	"AKIA",
+	"github_pat_",
+] as const;
+
+/** Mask a secret for safe display: known prefix + bullets, never the value. */
 export function maskSecret(value: string): string {
-	if (value.length <= 8) return "*".repeat(value.length);
-	return `${value.slice(0, 4)}****${value.slice(-2)}`;
+	for (const prefix of KNOWN_PREFIXES) {
+		if (value.startsWith(prefix)) return `${prefix}••••`;
+	}
+	if (value.length <= 8) return "•".repeat(value.length);
+	return `${value.slice(0, 4)}••••`;
+}
+
+function isAllowed(raw: string, allow: string[] | undefined): boolean {
+	if (!allow || allow.length === 0) return false;
+	for (const pattern of allow) {
+		try {
+			if (new RegExp(pattern).test(raw)) return true;
+		} catch {
+			if (raw.includes(pattern)) return true;
+		}
+	}
+	return false;
 }
 
 const DEFAULT_ENTROPY_THRESHOLD = 4.5;
@@ -131,7 +164,8 @@ const DETECTORS: Detector[] = [
 	{
 		id: "aws-secret-key",
 		severity: "critical",
-		regex: /aws.{0,25}(secret|private).{0,25}[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?/gi,
+		regex:
+			/aws.{0,25}(secret|private).{0,25}[=:]\s*["']?[A-Za-z0-9/+=]{40}["']?/gi,
 		message: "AWS secret access key",
 	},
 	{
@@ -149,7 +183,8 @@ const DETECTORS: Detector[] = [
 	{
 		id: "private-key",
 		severity: "critical",
-		regex: /-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----/g,
+		regex:
+			/-----BEGIN (RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----/g,
 		message: "Private key material",
 	},
 	{
@@ -200,7 +235,11 @@ function buildDetectors(customRules: PolicyRule[] | undefined): Detector[] {
 	return detectors;
 }
 
-function overlaps(taken: Array<[number, number]>, start: number, end: number): boolean {
+function overlaps(
+	taken: Array<[number, number]>,
+	start: number,
+	end: number,
+): boolean {
 	for (const [s, e] of taken) {
 		if (start < e && end > s) return true;
 	}
@@ -211,7 +250,10 @@ function overlaps(taken: Array<[number, number]>, start: number, end: number): b
  * Scan a string for secrets. Pattern detectors run first, then a
  * Shannon-entropy pass over long tokens that no detector claimed.
  */
-export function scanText(text: string, options: ScanTextOptions = {}): Finding[] {
+export function scanText(
+	text: string,
+	options: ScanTextOptions = {},
+): Finding[] {
 	const file = options.file ?? "<text>";
 	const threshold = options.entropyThreshold ?? DEFAULT_ENTROPY_THRESHOLD;
 	const detectors = buildDetectors(options.customRules);
@@ -224,12 +266,17 @@ export function scanText(text: string, options: ScanTextOptions = {}): Finding[]
 
 		for (const detector of detectors) {
 			detector.regex.lastIndex = 0;
-			for (let m = detector.regex.exec(line); m !== null; m = detector.regex.exec(line)) {
+			for (
+				let m = detector.regex.exec(line);
+				m !== null;
+				m = detector.regex.exec(line)
+			) {
 				if (m[0].length === 0) break;
 				const start = m.index;
 				const end = start + m[0].length;
 				if (overlaps(taken, start, end)) continue;
 				if (detector.accept && !detector.accept(m[0])) continue;
+				if (isAllowed(m[0], options.allow)) continue;
 				taken.push([start, end]);
 				findings.push({
 					detector: detector.id,
@@ -253,6 +300,7 @@ export function scanText(text: string, options: ScanTextOptions = {}): Finding[]
 			if (/^[0-9a-f]+$/i.test(token)) continue;
 			const entropy = shannonEntropy(token);
 			if (entropy < threshold) continue;
+			if (isAllowed(token, options.allow)) continue;
 			taken.push([start, end]);
 			findings.push({
 				detector: "high-entropy",
@@ -281,7 +329,9 @@ function scanEnvLines(text: string, file: string): Finding[] {
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i];
 		if (line.trimStart().startsWith("#")) continue;
-		const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/.exec(line);
+		const m = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/.exec(
+			line,
+		);
 		if (!m) continue;
 		const value = m[2].trim().replace(/^["']|["']$/g, "");
 		if (value === "") continue;
@@ -365,7 +415,11 @@ function buildIgnoreRules(root: string, extra: string[]): IgnoreRule[] {
 	return rules;
 }
 
-function isIgnored(rules: IgnoreRule[], relPath: string, isDir: boolean): boolean {
+function isIgnored(
+	rules: IgnoreRule[],
+	relPath: string,
+	isDir: boolean,
+): boolean {
 	const base = basename(relPath);
 	for (const rule of rules) {
 		if (rule.dirOnly && !isDir) continue;
@@ -375,7 +429,11 @@ function isIgnored(rules: IgnoreRule[], relPath: string, isDir: boolean): boolea
 	return false;
 }
 
-function scanFile(absPath: string, relPath: string, options: ScanOptions): Finding[] | null {
+function scanFile(
+	absPath: string,
+	relPath: string,
+	options: ScanOptions,
+): Finding[] | null {
 	const stat = statSync(absPath);
 	if (stat.size > (options.maxFileSize ?? DEFAULT_MAX_FILE_SIZE)) return null;
 	const buffer = readFileSync(absPath);
@@ -415,7 +473,8 @@ export function scanDir(dir: string, options: ScanOptions = {}): ScanResult {
 				continue;
 			}
 			if (entry.isDirectory()) {
-				if (ALWAYS_SKIP_DIRS.has(entry.name) || isIgnored(rules, rel, true)) continue;
+				if (ALWAYS_SKIP_DIRS.has(entry.name) || isIgnored(rules, rel, true))
+					continue;
 				walk(abs);
 				continue;
 			}
@@ -480,6 +539,8 @@ export function listStagedFiles(cwd: string): string[] {
 			.map((l) => l.trim())
 			.filter((l) => l !== "");
 	} catch {
-		throw new UserError("--staged requires git and a git repository in the current directory");
+		throw new UserError(
+			"--staged requires git and a git repository in the current directory",
+		);
 	}
 }

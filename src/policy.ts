@@ -16,16 +16,29 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LockMode, Policy, PolicyAction, PolicyRule, RiskLevel } from "@ruah-dev/schema";
+import type {
+	LockMode,
+	Policy,
+	PolicyAction,
+	PolicyRule,
+	RiskLevel,
+} from "@ruah-dev/schema";
 import { UserError } from "./errors.js";
+import { expandCommand } from "./normalize.js";
 
 /** Config root directory name — always under the consumer's CWD. */
 export const RUAH_DIR = ".ruah";
 
-/** Policy file name inside the config root. */
-export const POLICY_FILE = "policy.json";
+/**
+ * Preferred policy file (6-pool name). `policy.json` is still loaded as a
+ * fallback so existing repos keep working.
+ */
+export const POLICY_FILE = "guard.json";
 
-const ACTIONS: readonly string[] = ["allow", "deny", "approve"];
+/** Legacy filename kept as a fallback load path. */
+export const LEGACY_POLICY_FILE = "policy.json";
+
+const ACTIONS: readonly string[] = ["allow", "deny", "approve", "ask"];
 const KINDS: readonly string[] = ["command", "path", "secret"];
 const RISKS: readonly string[] = ["low", "medium", "high", "critical"];
 
@@ -82,6 +95,49 @@ export const DEFAULT_POLICY: Policy = {
 			action: "deny",
 			riskLevel: "critical",
 			description: "SQL DROP TABLE",
+		},
+		{
+			kind: "command",
+			id: "deny-truncate",
+			pattern: "\\btruncate\\s+(table|database|schema)\\b",
+			action: "deny",
+			riskLevel: "critical",
+			description: "SQL TRUNCATE without a WHERE-guard (TRUNCATE has none)",
+		},
+		{
+			kind: "command",
+			id: "deny-rm-dot",
+			pattern:
+				"rm\\s+(-[^\\s]*\\s+)*-[^\\s]*r[^\\s]*(\\s+-[^\\s]*)*\\s+[\"']?\\.(/)?[\"']?\\s*$",
+			action: "deny",
+			riskLevel: "critical",
+			description: "Recursive delete of the current directory (repo root)",
+		},
+		{
+			kind: "command",
+			id: "deny-dev-sd",
+			pattern: ">\\s*/dev/sd[a-z]\\d*",
+			action: "deny",
+			riskLevel: "critical",
+			description: "Redirect onto a block device",
+		},
+		{
+			kind: "command",
+			id: "deny-git-reset-hard-clean",
+			pattern:
+				"git\\s+reset\\s+--hard\\b[\\s\\S]*git\\s+clean\\s+-[a-zA-Z]*f[a-zA-Z]*d",
+			action: "deny",
+			riskLevel: "high",
+			description: "git reset --hard combined with git clean -fd",
+		},
+		{
+			kind: "command",
+			id: "deny-base64-pipe-shell",
+			pattern:
+				"base64\\s+(-d|--decode)\\b[^|;&]*\\|\\s*(sudo\\s+)?(bash|sh|zsh)\\b",
+			action: "deny",
+			riskLevel: "high",
+			description: "Decoded payload piped straight into a shell",
 		},
 		{
 			kind: "command",
@@ -188,7 +244,8 @@ export const DEFAULT_POLICY: Policy = {
 			pattern: "**/.env*",
 			action: "approve",
 			riskLevel: "high",
-			description: "Env files may contain secrets — touching them requires approval",
+			description:
+				"Env files may contain secrets — touching them requires approval",
 		},
 	],
 	metadata: {
@@ -222,8 +279,18 @@ export interface CheckCommandOptions {
 
 function defaultRiskFor(action: PolicyAction): RiskLevel {
 	if (action === "deny") return "high";
-	if (action === "approve") return "medium";
+	if (action === "approve" || action === "ask") return "medium";
 	return "low";
+}
+
+function isAsk(action: PolicyAction): boolean {
+	return action === "approve" || action === "ask";
+}
+
+function rankDecision(action: PolicyAction): number {
+	if (action === "deny") return 2;
+	if (isAsk(action)) return 1;
+	return 0;
 }
 
 function matchedResult(rule: PolicyRule): CheckResult {
@@ -232,7 +299,9 @@ function matchedResult(rule: PolicyRule): CheckResult {
 		rule: rule.id ?? rule.pattern,
 		pattern: rule.pattern,
 		riskLevel: rule.riskLevel ?? defaultRiskFor(rule.action),
-		reason: rule.description ?? `matched ${rule.kind} rule "${rule.id ?? rule.pattern}"`,
+		reason:
+			rule.description ??
+			`matched ${rule.kind} rule "${rule.id ?? rule.pattern}"`,
 	};
 }
 
@@ -258,23 +327,16 @@ function commandRuleMatches(rule: PolicyRule, command: string): boolean {
 	return command.toLowerCase().includes(rule.pattern.toLowerCase());
 }
 
-/**
- * Evaluate a shell command against a policy. First matching `command` rule
- * wins; with no match the policy's `defaultAction` applies.
- */
-export function checkCommand(
+function checkCommandRaw(
 	command: string,
-	policy: Policy = DEFAULT_POLICY,
-	options: CheckCommandOptions = {},
+	policy: Policy,
+	options: CheckCommandOptions,
 ): CheckResult {
-	if (typeof command !== "string" || command.trim() === "") {
-		throw new UserError("checkCommand needs a non-empty command string");
-	}
 	for (const rule of policy.rules) {
 		if (rule.kind !== "command") continue;
 		if (!commandRuleMatches(rule, command)) continue;
 		const result = matchedResult(rule);
-		if (result.decision === "approve" && options.grantedCommands?.includes(command)) {
+		if (isAsk(result.decision) && options.grantedCommands?.includes(command)) {
 			return {
 				...result,
 				decision: "allow",
@@ -284,6 +346,33 @@ export function checkCommand(
 		return result;
 	}
 	return defaultResult(policy);
+}
+
+/**
+ * Evaluate a shell command against a policy. First matching `command` rule
+ * wins; with no match the policy's `defaultAction` applies.
+ *
+ * The raw command plus unwrapped / `$HOME`-expanded / compound-split
+ * variants are all scored; the most severe decision wins (deny > ask >
+ * allow). This is best-effort pattern defense, not a shell interpreter.
+ */
+export function checkCommand(
+	command: string,
+	policy: Policy = DEFAULT_POLICY,
+	options: CheckCommandOptions = {},
+): CheckResult {
+	if (typeof command !== "string" || command.trim() === "") {
+		throw new UserError("checkCommand needs a non-empty command string");
+	}
+	let best = checkCommandRaw(command, policy, options);
+	for (const variant of expandCommand(command)) {
+		const result = checkCommandRaw(variant, policy, options);
+		if (rankDecision(result.decision) > rankDecision(best.decision)) {
+			best = result;
+		}
+		if (best.decision === "deny") return best;
+	}
+	return best;
 }
 
 /**
@@ -349,7 +438,9 @@ export function checkPath(
 		throw new UserError("checkPath needs a non-empty path");
 	}
 	if (mode !== "read" && mode !== "write") {
-		throw new UserError(`checkPath mode must be "read" or "write", got "${String(mode)}"`);
+		throw new UserError(
+			`checkPath mode must be "read" or "write", got "${String(mode)}"`,
+		);
 	}
 	const normalized = normalizePath(path);
 	for (const rule of policy.rules) {
@@ -384,7 +475,8 @@ export function validatePolicyShape(value: unknown): string[] {
 	}
 	if (
 		policy.defaultAction !== undefined &&
-		(typeof policy.defaultAction !== "string" || !ACTIONS.includes(policy.defaultAction))
+		(typeof policy.defaultAction !== "string" ||
+			!ACTIONS.includes(policy.defaultAction))
 	) {
 		problems.push(`"defaultAction" must be one of: ${ACTIONS.join(", ")}`);
 	}
@@ -401,13 +493,17 @@ export function validatePolicyShape(value: unknown): string[] {
 			problems.push(`rules[${index}].pattern must be a non-empty string`);
 		}
 		if (typeof r.action !== "string" || !ACTIONS.includes(r.action)) {
-			problems.push(`rules[${index}].action must be one of: ${ACTIONS.join(", ")}`);
+			problems.push(
+				`rules[${index}].action must be one of: ${ACTIONS.join(", ")}`,
+			);
 		}
 		if (
 			r.riskLevel !== undefined &&
 			(typeof r.riskLevel !== "string" || !RISKS.includes(r.riskLevel))
 		) {
-			problems.push(`rules[${index}].riskLevel must be one of: ${RISKS.join(", ")}`);
+			problems.push(
+				`rules[${index}].riskLevel must be one of: ${RISKS.join(", ")}`,
+			);
 		}
 	});
 	return problems;
@@ -425,9 +521,37 @@ export interface LoadedPolicy {
  * built-in {@link DEFAULT_POLICY} when no file exists. Throws {@link UserError}
  * on malformed JSON or an invalid policy shape.
  */
+function resolvePolicyPath(root: string): string | null {
+	const preferred = join(root, RUAH_DIR, POLICY_FILE);
+	if (existsSync(preferred)) return preferred;
+	const legacy = join(root, RUAH_DIR, LEGACY_POLICY_FILE);
+	if (existsSync(legacy)) return legacy;
+	return null;
+}
+
+/**
+ * Secret-pattern allowlist from a policy document. Extra field
+ * `secrets.allow` (not in the canonical Policy type — tool-local).
+ */
+export function secretAllowlist(policy: Policy): string[] {
+	const extra = policy as Policy & {
+		secrets?: { allow?: unknown };
+	};
+	const fromField = extra.secrets?.allow;
+	const fromMeta = policy.metadata?.secretsAllow;
+	const raw = Array.isArray(fromField)
+		? fromField
+		: Array.isArray(fromMeta)
+			? fromMeta
+			: [];
+	return raw.filter(
+		(item): item is string => typeof item === "string" && item !== "",
+	);
+}
+
 export function loadPolicy(root: string = process.cwd()): LoadedPolicy {
-	const file = join(root, RUAH_DIR, POLICY_FILE);
-	if (!existsSync(file)) {
+	const file = resolvePolicyPath(root);
+	if (file === null) {
 		return { policy: DEFAULT_POLICY, source: "default" };
 	}
 	let parsed: unknown;
@@ -440,7 +564,9 @@ export function loadPolicy(root: string = process.cwd()): LoadedPolicy {
 	}
 	const problems = validatePolicyShape(parsed);
 	if (problems.length > 0) {
-		throw new UserError(`Invalid policy file ${file}:\n  - ${problems.join("\n  - ")}`);
+		throw new UserError(
+			`Invalid policy file ${file}:\n  - ${problems.join("\n  - ")}`,
+		);
 	}
 	return { policy: parsed as Policy, source: file };
 }
@@ -458,7 +584,10 @@ export function savePolicy(root: string, policy: Policy): string {
  * Write a starter `.ruah/policy.json` (a copy of the default policy the
  * user can edit). Refuses to overwrite an existing file unless `force`.
  */
-export function initPolicy(root: string = process.cwd(), force = false): string {
+export function initPolicy(
+	root: string = process.cwd(),
+	force = false,
+): string {
 	const file = join(root, RUAH_DIR, POLICY_FILE);
 	if (existsSync(file) && !force) {
 		throw new UserError(`${file} already exists — pass --force to overwrite`);

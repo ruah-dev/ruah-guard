@@ -9,8 +9,10 @@
  * logs go to stderr.
  */
 
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { LockMode, RiskLevel } from "@ruah-dev/schema";
+import type { LockMode, Policy, RiskLevel } from "@ruah-dev/schema";
+import type { ApprovalStatus } from "./approvals.js";
 import {
 	denyApproval,
 	grantApproval,
@@ -18,19 +20,34 @@ import {
 	listApprovals,
 	requestApproval,
 } from "./approvals.js";
-import type { ApprovalStatus } from "./approvals.js";
-import { AUDIT_FILE, appendAudit, readAudit } from "./audit.js";
+import { AUDIT_FILE, appendAudit, auditStats, readAudit } from "./audit.js";
 import { UserError } from "./errors.js";
-import { checkCommand, checkPath, initPolicy, loadPolicy, RUAH_DIR } from "./policy.js";
+import {
+	claudeCodeHookConfig,
+	evaluateHookEvent,
+	failClosedVerdict,
+	failOpenVerdict,
+	hookResult,
+	parseHookEvent,
+	toVerdict,
+} from "./hook.js";
 import type { CheckResult } from "./policy.js";
 import {
+	checkCommand,
+	checkPath,
+	initPolicy,
+	loadPolicy,
+	RUAH_DIR,
+	secretAllowlist,
+} from "./policy.js";
+import type { ScanResult } from "./scanner.js";
+import {
 	listStagedFiles,
+	SEVERITY_ORDER,
 	scanDir,
 	scanFiles,
-	SEVERITY_ORDER,
 	severityAtLeast,
 } from "./scanner.js";
-import type { ScanResult } from "./scanner.js";
 import { VERSION } from "./version.js";
 
 export interface ParsedArgs {
@@ -38,7 +55,20 @@ export interface ParsedArgs {
 	flags: Record<string, string | boolean>;
 }
 
-const BOOLEAN_FLAGS = new Set(["json", "force", "staged", "help", "h", "version", "v"]);
+const BOOLEAN_FLAGS = new Set([
+	"json",
+	"force",
+	"staged",
+	"help",
+	"h",
+	"version",
+	"v",
+	"stdin",
+	"stats",
+	"fail-open",
+	"quiet",
+	"debug",
+]);
 
 export function parseArgs(argv: string[]): ParsedArgs {
 	const args: ParsedArgs = { _: [], flags: {} };
@@ -52,7 +82,11 @@ export function parseArgs(argv: string[]): ParsedArgs {
 			} else {
 				const key = arg.slice(2);
 				const next = argv[i + 1];
-				if (BOOLEAN_FLAGS.has(key) || next === undefined || next.startsWith("-")) {
+				if (
+					BOOLEAN_FLAGS.has(key) ||
+					next === undefined ||
+					next.startsWith("-")
+				) {
 					args.flags[key] = true;
 				} else {
 					args.flags[key] = next;
@@ -74,19 +108,25 @@ function buildHelp(): string {
 ruah-guard — policy engine for agent safety
 
 Usage:
-  ruah-guard init [--force] [--json]            Write a starter .ruah/policy.json
-  ruah-guard check --command '<cmd>' [--json]   Evaluate a shell command against the policy
+  ruah-guard init [--force] [--json]            Write a starter .ruah/guard.json
+  ruah-guard check --cmd '<cmd>' [--json]       Evaluate a shell command against the policy
+  ruah-guard check --command '<cmd>' [--json]   (alias of --cmd)
   ruah-guard check --path <p> [--mode read|write] [--json]
                                                 Evaluate a file path boundary (default mode: write)
+  ruah-guard check --file <path> [--json]       Scan one file / diff for secrets
   ruah-guard scan [dir] [--staged] [--fail-on low|medium|high|critical]
                   [--exclude <glob,glob>] [--json]
                                                 Scan for committed secrets (default dir: .)
+  ruah-guard hook claude-code                   Print ready-to-paste Claude Code hook config
+  ruah-guard hook --stdin [--fail-open] [--json]
+                                                Read one PreToolUse / generic event from stdin
   ruah-guard request --command '<cmd>' [--reason '<why>'] [--json]
                                                 Queue a command for human approval
   ruah-guard approve list [--status pending|granted|denied] [--json]
   ruah-guard approve grant <id> [--json]
   ruah-guard approve deny <id> [--json]
-  ruah-guard audit [--tail <n>] [--json]        Show the append-only audit log
+  ruah-guard audit [--last <n>] [--stats] [--json]
+                                                Show the append-only audit log
 
 Decisions:
   allow    command/path is fine — exit 0
@@ -94,14 +134,19 @@ Decisions:
   deny     blocked by policy — exit 1
 
 Policy:
-  Reads .ruah/policy.json from the current directory (canonical Policy type
-  from @ruah-dev/schema). Without one, a built-in default applies: destructive
-  commands (rm -rf /, dd, mkfs, DROP TABLE, force-push to main, curl|bash,
-  chmod 777) are denied; git push, npm publish, docker push, terraform apply,
-  destructive SQL, and deploys require approval.
+  Reads .ruah/guard.json (falls back to .ruah/policy.json). Canonical Policy
+  type from @ruah-dev/schema. Without one, a built-in default applies:
+  destructive commands (rm -rf /, ~, ., dd, mkfs, DROP/TRUNCATE, force-push
+  to main, curl|bash, chmod 777, > /dev/sd*) are denied; git push, npm
+  publish, docker push, terraform apply, DELETE FROM, and deploys require
+  approval (action "ask" / "approve").
+
+  Full shell interpretation is out of scope — guard is best-effort pattern
+  defense. Documented uncatchable bypasses live in the README.
 
 Options:
   --json         Machine-readable JSON on stdout (human logs go to stderr)
+  --fail-open    Hook: allow on malformed stdin (default is fail-closed)
   --help, -h     Show this help
   --version, -v  Show version
 
@@ -114,11 +159,12 @@ Environment:
   RUAH_ACTOR     Actor recorded in approvals and the audit log (default: OS user)
 
 Examples:
-  ruah-guard check --command 'rm -rf /' --json
+  ruah-guard check --cmd 'rm -rf /' --json
+  echo '{"tool":"Bash","command":"rm -rf /"}' | ruah-guard hook --stdin
   ruah-guard scan . --json
   ruah-guard request --command 'git push origin main' --reason 'release v1.2.0'
   ruah-guard approve grant 1a2b3c4d
-  ruah-guard audit --tail 20 --json
+  ruah-guard audit --last 20 --json
 `;
 }
 
@@ -132,7 +178,11 @@ function emitJson(data: unknown): void {
 
 function safeAudit(
 	root: string,
-	entry: { action: string; decision?: string; details?: Record<string, unknown> },
+	entry: {
+		action: string;
+		decision?: string;
+		details?: Record<string, unknown>;
+	},
 ): void {
 	try {
 		appendAudit(root, entry);
@@ -158,7 +208,9 @@ function cmdInit(args: ParsedArgs, json: boolean): void {
 		emitJson({ written: file });
 	} else {
 		out(`Wrote starter policy: ${file}`);
-		out("Edit the rules, then try: ruah-guard check --command 'git push' --json");
+		out(
+			"Edit the rules, then try: ruah-guard check --command 'git push' --json",
+		);
 	}
 }
 
@@ -171,13 +223,24 @@ interface CheckPayload extends CheckResult {
 
 function emitCheckResult(payload: CheckPayload, json: boolean): void {
 	if (json) {
-		emitJson(payload);
+		const verdict = toVerdict(payload, payload.subject);
+		emitJson({
+			...payload,
+			schemaVersion: verdict.schemaVersion,
+			ruleId: verdict.ruleId,
+			matched: verdict.matched,
+			severity: verdict.severity,
+		});
 	} else {
-		out(`${payload.decision.toUpperCase()} (${payload.riskLevel}) ${payload.subject}`);
+		out(
+			`${payload.decision.toUpperCase()} (${payload.riskLevel}) ${payload.subject}`,
+		);
 		out(`  rule:   ${payload.rule ?? "(policy default action)"}`);
 		out(`  reason: ${payload.reason}`);
 		if (payload.decision === "approve") {
-			out(`  next:   ruah-guard request --command '${payload.subject}' --reason '<why>'`);
+			out(
+				`  next:   ruah-guard request --command '${payload.subject}' --reason '<why>'`,
+			);
 		}
 	}
 	if (payload.decision !== "allow") {
@@ -187,10 +250,12 @@ function emitCheckResult(payload: CheckPayload, json: boolean): void {
 
 function cmdCheck(args: ParsedArgs, json: boolean): void {
 	const cwd = process.cwd();
-	const command = stringFlag(args, "command");
+	const command = stringFlag(args, "cmd") ?? stringFlag(args, "command");
 	const path = stringFlag(args, "path");
-	if (command !== undefined && path !== undefined) {
-		throw new UserError("check takes either --command or --path, not both");
+	const file = stringFlag(args, "file");
+	const selected = [command, path, file].filter((v) => v !== undefined);
+	if (selected.length > 1) {
+		throw new UserError("check takes one of --cmd, --path, or --file");
 	}
 	const loaded = loadPolicy(cwd);
 
@@ -204,7 +269,12 @@ function cmdCheck(args: ParsedArgs, json: boolean): void {
 			details: { command, rule: result.rule },
 		});
 		emitCheckResult(
-			{ kind: "command", subject: command, ...result, policySource: loaded.source },
+			{
+				kind: "command",
+				subject: command,
+				...result,
+				policySource: loaded.source,
+			},
 			json,
 		);
 		return;
@@ -213,7 +283,9 @@ function cmdCheck(args: ParsedArgs, json: boolean): void {
 	if (path !== undefined) {
 		const modeFlag = stringFlag(args, "mode") ?? "write";
 		if (modeFlag !== "read" && modeFlag !== "write") {
-			throw new UserError(`--mode must be "read" or "write", got "${modeFlag}"`);
+			throw new UserError(
+				`--mode must be "read" or "write", got "${modeFlag}"`,
+			);
 		}
 		const result = checkPath(path, modeFlag, loaded.policy);
 		safeAudit(cwd, {
@@ -222,13 +294,68 @@ function cmdCheck(args: ParsedArgs, json: boolean): void {
 			details: { path, mode: modeFlag, rule: result.rule },
 		});
 		emitCheckResult(
-			{ kind: "path", subject: path, mode: modeFlag, ...result, policySource: loaded.source },
+			{
+				kind: "path",
+				subject: path,
+				mode: modeFlag,
+				...result,
+				policySource: loaded.source,
+			},
 			json,
 		);
 		return;
 	}
 
-	throw new UserError("check needs --command '<cmd>' or --path <p>");
+	if (file !== undefined) {
+		cmdScanFile(cwd, file, loaded.policy, json);
+		return;
+	}
+
+	throw new UserError(
+		"check needs --cmd '<cmd>', --path <p>, or --file <path>",
+	);
+}
+
+function cmdScanFile(
+	cwd: string,
+	file: string,
+	policy: Policy,
+	json: boolean,
+): void {
+	const result = scanFiles(cwd, [file], {
+		customRules: policy.rules.filter((r) => r.kind === "secret"),
+		allow: secretAllowlist(policy),
+	});
+	const failed = result.findings.length > 0;
+	safeAudit(cwd, {
+		action: "check.file",
+		decision: failed ? "deny" : "allow",
+		details: { file, findings: result.findings.length },
+	});
+	if (json) {
+		emitJson({
+			schemaVersion: "1",
+			kind: "file",
+			subject: file,
+			findings: result.findings,
+			summary: {
+				filesScanned: result.filesScanned,
+				total: result.findings.length,
+				failed,
+			},
+		});
+	} else {
+		for (const f of result.findings) {
+			out(
+				`[${f.severity}] ${f.file}:${f.line}:${f.column} ${f.detector} — ${f.message} (${f.excerpt})`,
+			);
+		}
+		out(
+			`${result.findings.length} finding(s) in ${file}` +
+				` — ${failed ? "FAIL" : "OK"}`,
+		);
+	}
+	if (failed) process.exitCode = 1;
 }
 
 function cmdScan(args: ParsedArgs, json: boolean): void {
@@ -250,7 +377,11 @@ function cmdScan(args: ParsedArgs, json: boolean): void {
 		: [];
 	const loaded = loadPolicy(cwd);
 	const customRules = loaded.policy.rules.filter((r) => r.kind === "secret");
-	const options = { exclude, customRules };
+	const options = {
+		exclude,
+		customRules,
+		allow: secretAllowlist(loaded.policy),
+	};
 
 	let result: ScanResult;
 	let target: string;
@@ -262,7 +393,9 @@ function cmdScan(args: ParsedArgs, json: boolean): void {
 		result = scanDir(resolve(cwd, dirArg), options);
 	}
 
-	const failed = result.findings.some((f) => severityAtLeast(f.severity, failOn));
+	const failed = result.findings.some((f) =>
+		severityAtLeast(f.severity, failOn),
+	);
 	const bySeverity: Record<string, number> = {};
 	for (const finding of result.findings) {
 		bySeverity[finding.severity] = (bySeverity[finding.severity] ?? 0) + 1;
@@ -287,7 +420,9 @@ function cmdScan(args: ParsedArgs, json: boolean): void {
 		});
 	} else {
 		for (const f of result.findings) {
-			out(`[${f.severity}] ${f.file}:${f.line}:${f.column} ${f.detector} — ${f.message} (${f.excerpt})`);
+			out(
+				`[${f.severity}] ${f.file}:${f.line}:${f.column} ${f.detector} — ${f.message} (${f.excerpt})`,
+			);
 		}
 		out(
 			`${result.findings.length} finding(s) in ${result.filesScanned} file(s)` +
@@ -334,16 +469,25 @@ function cmdApprove(args: ParsedArgs, json: boolean): void {
 			statusFlag !== "granted" &&
 			statusFlag !== "denied"
 		) {
-			throw new UserError(`--status must be pending, granted, or denied — got "${statusFlag}"`);
+			throw new UserError(
+				`--status must be pending, granted, or denied — got "${statusFlag}"`,
+			);
 		}
-		const requests = listApprovals(cwd, statusFlag as ApprovalStatus | undefined);
+		const requests = listApprovals(
+			cwd,
+			statusFlag as ApprovalStatus | undefined,
+		);
 		if (json) {
 			emitJson({ requests, count: requests.length });
 		} else if (requests.length === 0) {
-			out("No approval requests. Queue one with: ruah-guard request --command '<cmd>'");
+			out(
+				"No approval requests. Queue one with: ruah-guard request --command '<cmd>'",
+			);
 		} else {
 			for (const r of requests) {
-				out(`${r.id}  [${r.status}]  ${r.command}${r.reason ? `  — ${r.reason}` : ""}`);
+				out(
+					`${r.id}  [${r.status}]  ${r.command}${r.reason ? `  — ${r.reason}` : ""}`,
+				);
 			}
 		}
 		return;
@@ -352,9 +496,12 @@ function cmdApprove(args: ParsedArgs, json: boolean): void {
 	if (sub === "grant" || sub === "deny") {
 		const id = args._[2];
 		if (id === undefined) {
-			throw new UserError(`approve ${sub} needs an id — see: ruah-guard approve list`);
+			throw new UserError(
+				`approve ${sub} needs an id — see: ruah-guard approve list`,
+			);
 		}
-		const request = sub === "grant" ? grantApproval(cwd, id) : denyApproval(cwd, id);
+		const request =
+			sub === "grant" ? grantApproval(cwd, id) : denyApproval(cwd, id);
 		safeAudit(cwd, {
 			action: `approve.${sub}`,
 			decision: request.status,
@@ -368,29 +515,129 @@ function cmdApprove(args: ParsedArgs, json: boolean): void {
 		return;
 	}
 
-	throw new UserError("approve needs a subcommand: list | grant <id> | deny <id>");
+	throw new UserError(
+		"approve needs a subcommand: list | grant <id> | deny <id>",
+	);
 }
 
 function cmdAudit(args: ParsedArgs, json: boolean): void {
 	const cwd = process.cwd();
-	const tailFlag = stringFlag(args, "tail");
+	const tailFlag = stringFlag(args, "last") ?? stringFlag(args, "tail");
 	let tail = 20;
 	if (tailFlag !== undefined) {
 		tail = Number.parseInt(tailFlag, 10);
 		if (Number.isNaN(tail) || tail < 0) {
-			throw new UserError(`--tail must be a non-negative integer, got "${tailFlag}"`);
+			throw new UserError(
+				`--last must be a non-negative integer, got "${tailFlag}"`,
+			);
 		}
 	}
 	const entries = readAudit(cwd, tail);
+	if (args.flags.stats === true) {
+		const stats = auditStats(readAudit(cwd));
+		if (json) {
+			emitJson({ schemaVersion: "1", ...stats });
+		} else {
+			out(`total ${stats.total}`);
+			for (const key of Object.keys(stats.byDecision).sort()) {
+				out(`  decision ${key}: ${stats.byDecision[key]}`);
+			}
+			for (const key of Object.keys(stats.byRule).sort()) {
+				out(`  rule ${key}: ${stats.byRule[key]}`);
+			}
+		}
+		return;
+	}
 	if (json) {
-		emitJson({ entries, count: entries.length, file: join(cwd, RUAH_DIR, AUDIT_FILE) });
+		emitJson({
+			entries,
+			count: entries.length,
+			file: join(cwd, RUAH_DIR, AUDIT_FILE),
+		});
 	} else if (entries.length === 0) {
 		out("Audit log is empty.");
 	} else {
 		for (const e of entries) {
-			out(`${e.ts}  ${e.actor}  ${e.action}${e.decision ? `  ${e.decision}` : ""}`);
+			out(
+				`${e.ts}  ${e.actor}  ${e.action}${e.decision ? `  ${e.decision}` : ""}`,
+			);
 		}
 	}
+}
+
+function cmdHook(args: ParsedArgs, json: boolean): void {
+	const target = args._[1];
+	if (target === "claude-code") {
+		const config = claudeCodeHookConfig();
+		if (json) {
+			emitJson(JSON.parse(config));
+		} else {
+			out(config.trimEnd());
+		}
+		return;
+	}
+	if (args.flags.stdin !== true && target !== "--stdin") {
+		throw new UserError(
+			"hook needs `claude-code` or `--stdin` — run ruah-guard --help",
+		);
+	}
+
+	const failOpen = args.flags["fail-open"] === true;
+	const cwd = process.cwd();
+	let raw = "";
+	try {
+		raw = readFileSync(0, "utf8");
+	} catch {
+		raw = "";
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		const failed = failOpen
+			? failOpenVerdict("malformed hook stdin JSON — fail-open")
+			: failClosedVerdict("malformed hook stdin JSON — fail-closed");
+		writeHook(failed, json);
+		return;
+	}
+	const event = parseHookEvent(parsed);
+	if (!event) {
+		const failed = failOpen
+			? failOpenVerdict("hook event missing tool — fail-open")
+			: failClosedVerdict("hook event missing tool — fail-closed");
+		writeHook(failed, json);
+		return;
+	}
+	const loaded = loadPolicy(cwd);
+	const result = evaluateHookEvent(event, loaded.policy, grantedCommands(cwd));
+	const matched = event.command ?? event.path ?? event.tool;
+	const payload = hookResult(result, matched);
+	safeAudit(cwd, {
+		action: "hook",
+		decision: payload.verdict.decision,
+		details: { tool: event.tool, rule: result.rule, matched },
+	});
+	writeHook(payload, json);
+}
+
+function writeHook(
+	payload: ReturnType<typeof hookResult>,
+	json: boolean,
+): void {
+	// Hook always writes the verdict JSON (Claude Code reads stdout).
+	// Exit 0 so a deny is a result, not a hook crash.
+	emitJson({
+		...payload.verdict,
+		hookSpecificOutput: payload.hookSpecificOutput,
+	});
+	if (!json) {
+		// Human hint on stderr only — stdout stays pipe-clean.
+		console.error(
+			`${payload.verdict.decision.toUpperCase()} ${payload.verdict.ruleId ?? ""}`.trim(),
+		);
+	}
+	process.exitCode = 0;
 }
 
 function main(): void {
@@ -432,8 +679,13 @@ function main(): void {
 			case "audit":
 				cmdAudit(args, json);
 				break;
+			case "hook":
+				cmdHook(args, json);
+				break;
 			default:
-				throw new UserError(`Unknown command: ${command} (run ruah-guard --help)`);
+				throw new UserError(
+					`Unknown command: ${command} (run ruah-guard --help)`,
+				);
 		}
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);

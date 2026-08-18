@@ -38,7 +38,9 @@ describe("approvals lifecycle", () => {
 		assert.equal(request.status, "pending");
 		assert.equal(request.requestedBy, "test-actor");
 		assert.ok(existsSync(join(root, ".ruah", "approvals.json")));
-		const raw = JSON.parse(readFileSync(join(root, ".ruah", "approvals.json"), "utf8")) as {
+		const raw = JSON.parse(
+			readFileSync(join(root, ".ruah", "approvals.json"), "utf8"),
+		) as {
 			requests: unknown[];
 		};
 		assert.equal(raw.requests.length, 1);
@@ -54,7 +56,10 @@ describe("approvals lifecycle", () => {
 	});
 
 	it("grantApproval records decider and timestamp", () => {
-		const request = requestApproval(root, { command: "npm publish", actor: "t" });
+		const request = requestApproval(root, {
+			command: "npm publish",
+			actor: "t",
+		});
 		const granted = grantApproval(root, request.id, "approver");
 		assert.equal(granted.status, "granted");
 		assert.equal(granted.decidedBy, "approver");
@@ -62,7 +67,10 @@ describe("approvals lifecycle", () => {
 	});
 
 	it("denyApproval records the denial", () => {
-		const request = requestApproval(root, { command: "terraform apply", actor: "t" });
+		const request = requestApproval(root, {
+			command: "terraform apply",
+			actor: "t",
+		});
 		const denied = denyApproval(root, request.id, "approver");
 		assert.equal(denied.status, "denied");
 		assert.deepEqual(grantedCommands(root), []);
@@ -79,7 +87,10 @@ describe("approvals lifecycle", () => {
 	});
 
 	it("throws UserError when deciding twice", () => {
-		const request = requestApproval(root, { command: "npm publish", actor: "t" });
+		const request = requestApproval(root, {
+			command: "npm publish",
+			actor: "t",
+		});
 		grantApproval(root, request.id, "approver");
 		assert.throws(() => denyApproval(root, request.id), /already granted/);
 	});

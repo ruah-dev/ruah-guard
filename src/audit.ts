@@ -8,8 +8,11 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { RUAH_DIR } from "./policy.js";
 
-/** Audit log file name inside the config root. */
-export const AUDIT_FILE = "audit.jsonl";
+/** Audit log file name inside the config root (6-pool name). */
+export const AUDIT_FILE = "guard-audit.jsonl";
+
+/** Legacy filename still read as a fallback. */
+export const LEGACY_AUDIT_FILE = "audit.jsonl";
 
 /** One audit log entry. */
 export interface AuditEntry {
@@ -36,7 +39,12 @@ export function resolveActor(): string {
 	}
 }
 
-/** Append one entry to `.ruah/audit.jsonl` under `root`. Returns the full entry. */
+export interface AppendAuditOptions {
+	/** Injected clock (ms since epoch). Tests freeze time with this. */
+	now?: () => number;
+}
+
+/** Append one entry to `.ruah/guard-audit.jsonl` under `root`. Returns the full entry. */
 export function appendAudit(
 	root: string,
 	entry: {
@@ -45,11 +53,13 @@ export function appendAudit(
 		actor?: string;
 		details?: Record<string, unknown>;
 	},
+	options: AppendAuditOptions = {},
 ): AuditEntry {
 	const dir = join(root, RUAH_DIR);
 	mkdirSync(dir, { recursive: true });
+	const ts = new Date(options.now ? options.now() : Date.now()).toISOString();
 	const full: AuditEntry = {
-		ts: new Date().toISOString(),
+		ts,
 		actor: entry.actor ?? resolveActor(),
 		action: entry.action,
 		...(entry.decision !== undefined ? { decision: entry.decision } : {}),
@@ -63,8 +73,7 @@ export function appendAudit(
  * Read the audit log under `root`. With `tail`, only the last n entries are
  * returned. Malformed lines are skipped, never thrown.
  */
-export function readAudit(root: string, tail?: number): AuditEntry[] {
-	const file = join(root, RUAH_DIR, AUDIT_FILE);
+function parseAuditFile(file: string): AuditEntry[] {
 	if (!existsSync(file)) return [];
 	const entries: AuditEntry[] = [];
 	for (const line of readFileSync(file, "utf8").split("\n")) {
@@ -72,11 +81,50 @@ export function readAudit(root: string, tail?: number): AuditEntry[] {
 		try {
 			entries.push(JSON.parse(line) as AuditEntry);
 		} catch {
-			// Skip malformed lines — the log must never block a command.
+			// Skip malformed / torn lines — the log must never block a command.
 		}
 	}
+	return entries;
+}
+
+/**
+ * Read the audit log under `root`. Prefers `guard-audit.jsonl`, falls back
+ * to legacy `audit.jsonl`. With `tail`, only the last n entries are
+ * returned. Malformed or torn last lines are skipped, never thrown.
+ */
+export function readAudit(root: string, tail?: number): AuditEntry[] {
+	const preferred = join(root, RUAH_DIR, AUDIT_FILE);
+	const legacy = join(root, RUAH_DIR, LEGACY_AUDIT_FILE);
+	const entries = existsSync(preferred)
+		? parseAuditFile(preferred)
+		: parseAuditFile(legacy);
 	if (tail !== undefined && tail >= 0 && entries.length > tail) {
 		return entries.slice(entries.length - tail);
 	}
 	return entries;
+}
+
+/** Counts by decision and by rule id (from details.rule when present). */
+export interface AuditStats {
+	total: number;
+	byDecision: Record<string, number>;
+	byRule: Record<string, number>;
+	byAction: Record<string, number>;
+}
+
+export function auditStats(entries: AuditEntry[]): AuditStats {
+	const byDecision: Record<string, number> = {};
+	const byRule: Record<string, number> = {};
+	const byAction: Record<string, number> = {};
+	for (const entry of entries) {
+		byAction[entry.action] = (byAction[entry.action] ?? 0) + 1;
+		if (entry.decision) {
+			byDecision[entry.decision] = (byDecision[entry.decision] ?? 0) + 1;
+		}
+		const rule = entry.details?.rule;
+		if (typeof rule === "string" && rule !== "") {
+			byRule[rule] = (byRule[rule] ?? 0) + 1;
+		}
+	}
+	return { total: entries.length, byDecision, byRule, byAction };
 }

@@ -33,6 +33,7 @@
 		"pretest": "tsc -p tsconfig.test.json",
 		"test": "node --test dist-test/test/*.test.js",
 		"clean": "rm -rf dist dist-test",
+		"verify": "npm run lint && npm test && npm run build",
 		"prepublishOnly": "npm run clean && npm run build && npm test"
 	},
 	"keywords": [
